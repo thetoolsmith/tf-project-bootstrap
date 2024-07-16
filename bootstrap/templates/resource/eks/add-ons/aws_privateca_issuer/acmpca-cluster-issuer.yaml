@@ -1,0 +1,10 @@
+apiVersion: awspca.cert-manager.io/v1beta1
+kind: AWSPCAClusterIssuer
+metadata:
+  name: __MESH_NAME__
+  namespace: cert-manager
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+spec:
+  region: us-east-1
+  arn: __PCA_ARN__

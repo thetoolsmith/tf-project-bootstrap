@@ -1,0 +1,130 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Installer for cert-manager add-on for eks clusters
+
+PARAMETERS
+- ACTION (install | remove)
+
+USAGE: ./cert-manager install
+
+Requires
+- jq
+- helm
+- kubectl
+- cmctl
+
+ENV must be set when calling this
+
+References
+- https://cert-manager.io/docs/installation/helm/
+- https://aws-ia.github.io/terraform-aws-eks-blueprints/main/add-ons/cert-manager/
+- https://aws-ia.github.io/terraform-aws-eks-blueprints/add-ons/cert-manager/
+- https://cert-manager.io/docs/installation/verify/
+
+TODO: determine values input overrides needed
+DESCRIPTION
+
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export ACTION=$1
+export NAMESPACE='cert-manager'
+export SCRIPT_RESOURCES=$(basename $BASH_SOURCE | sed 's/-/_/g')
+
+source $SCRIPT_DIR/../../functions
+
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+
+if [[ "$ACTION" == "install" ]] ; then
+
+  namespaces=$(kubectl get namespaces)
+
+  if [[ ! $namespaces == *"$NAMESPACE"* ]] ; then
+    kubectl create namespace $NAMESPACE
+    sleep 2
+  fi
+
+  helm template \
+    cert-manager jetstack/cert-manager \
+    --namespace $NAMESPACE \
+    -f $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml \
+    --version v1.11.0 \
+    --set installCRDs=true \
+    --set prometheus.enabled=false \
+    --set webhook.timeoutSeconds=4 \
+    > $SCRIPT_DIR/cert-manager.yaml
+
+  kubectl apply -f $SCRIPT_DIR/cert-manager.yaml
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION cert-manager" || :
+
+  # get the deployment
+  deployment=$(kubectl get deployment -A -o json | jq -r '.items[] | select(.metadata.name | test("cert-manager")).metadata.name')
+  if [[ -z "$deployment" ]] ; then
+    echo "failed to locate deployment for $ADDON" && exit 1
+  fi
+
+  verify_deployment cert-manager
+
+elif [[ "$ACTION" == "remove" ]] ; then
+
+  namespaces=$(kubectl get namespaces)
+
+  if [[ ! $namespaces == *"$NAMESPACE"* ]] ; then
+    echo "failed to locate namespace $NAMESPACE for cert-manager deployment" && exit 1
+  fi
+
+  helm template \
+    cert-manager jetstack/cert-manager \
+    --namespace $NAMESPACE \
+    -f $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml \
+    --version v1.11.0 \
+    --set installCRDs=true \
+    --set prometheus.enabled=false \
+    --set webhook.timeoutSeconds=4 \
+    > $SCRIPT_DIR/cert-manager.yaml
+
+  kubectl delete -f $SCRIPT_DIR/cert-manager.yaml
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION cert-manager" || :
+
+  kubectl delete namespace $NAMESPACE
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to delete namespace $NAMESPACE" || :
+ 
+else
+  echo unknown action $ACTION
+  exit 1
+fi
+
+EXITCODE=$?
+test $EXITCODE -ne 0 && echo "failed to $ACTION cert-manager" && exit 1 || :
+
+export timeout=60
+
+case $ACTION in
+  install)
+    if [ $(which cmctl) ] ; then
+      while true && [ $timeout != 0 ] ; do
+        cmctl check api
+        case 1 in
+            $?)
+              echo keep trying....
+              let timeout--
+              if [ $timeout -eq 0 ] ; then
+                echo timeout reached
+              fi
+              sleep 2
+              continue ;;
+            *) echo "cert-manager verified"
+               break
+        esac
+        break
+      done
+    else
+      echo cmctl not found, unable to verify cert-manager api status ready
+    fi
+esac
+

@@ -1,0 +1,179 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Installer for aws-privateca-issuer add-on for eks clusters
+Cluster Dependency Prerequisites (must be pre-installed))
+- cert-manager
+
+PARAMETERS
+- ACTION (install | remove)
+
+USAGE: ./aws-privateca-issuer install
+
+Requires
+- helm
+- kubectl
+- jq
+
+ENV must be set when calling this
+
+References
+- https://github.com/cert-manager/aws-privateca-issuer/tree/main/charts/aws-pca-issuer
+- https://kubernetes.io/docs/reference/kubectl/jsonpath/
+- https://aws.amazon.com/blogs/security/tls-enabled-kubernetes-clusters-with-acm-private-ca-and-amazon-eks-2/
+
+TODO: determine values input overrides needed
+DESCRIPTION
+
+export ADDON='aws-privateca-issuer'
+export CHART='awspca/aws-privateca-issuer'
+export ACTION=$1
+export NAMESPACE='cert-manager'
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export SCRIPT_RESOURCES=$(basename $BASH_SOURCE | sed 's/-/_/g')
+
+echo region from env = $REGION
+echo region from awscli $(aws configure get region)
+
+source $SCRIPT_DIR/../../functions
+export SHORT_REGION=$(get_short_region $REGION)
+
+export PCA_ARN=$(dynamicLookupCaArn $(get_ca_name $ENV) $SHORT_REGION)
+export MESH_NAME=$(get_mesh $ENV)
+
+export ISSUER_RESOURCE=acmpca-cluster-issuer.yaml
+export ISSUER_RESOURCE_PATH="$SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE"
+
+# we update a template and reset it so as to not make new source changes so this check is required
+verify_template() {
+  reset_status=$(env -i git diff $1)
+  if [ ! -z "$reset_status" ] ; then
+    echo "not_ready"
+  else
+    echo "ready"
+  fi
+  unset reset_status
+}
+
+issuer_resource_status=$(verify_template $ISSUER_RESOURCE_PATH)
+
+if [[ "not_ready" == "$issuer_resource_status" ]] ; then
+  echo -e "$ISSUER_RESOURCE template not reset, abort" && exit 1
+fi
+
+remove() {
+  namespaces=$(kubectl get namespaces)
+
+  if [[ ! $namespaces == *"$NAMESPACE"* ]] ; then
+    echo "failed to locate namespace $NAMESPACE for $CHART deployment" && exit 1
+  fi
+
+  # get release
+  export RELEASE=$(helm ls -A -o json | jq -r '.[] | select(.name | test("aws-privateca-issuer")).name')
+  export RELEASE_NAMESPACE=$(helm ls -A -o json | jq -r '.[] | select(.name | test("aws-privateca-issuer")).namespace')
+
+  echo release $RELEASE
+  echo release namespace $RELEASE_NAMESPACE
+
+  helm uninstall $RELEASE -n $RELEASE_NAMESPACE 
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION $CHART" && exit 1 || :
+
+  kubectl delete -f $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION $ISSUER_RESOURCE" || :
+
+}
+
+
+install() {
+
+  export ACMPCA_ROLE_ARN=$(terraform output -json acmpca-role-arn | jq -r --arg CLUSTER_NAME "$CLUSTER_NAME" '.[] | select(. | contains($CLUSTER_NAME))')
+
+  sed -i '' -E "s|__ACMPCA_ROLE_ARN__|$ACMPCA_ROLE_ARN|g" $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  namespaces=$(kubectl get namespaces)
+
+  if [[ ! $namespaces == *"$NAMESPACE"* ]] ; then
+    kubectl create namespace $NAMESPACE
+  fi
+
+  release=$(helm list -A -o json | jq -r '.[] | select(.name | test("aws-privateca-issuer")).name')
+
+  if [[ "$release" == "aws-privateca-issuer" ]] ; then
+    echo -e "*** Release already exists for $CHART.\nHelm is lame and not idempotent!\nHang tight while we remove the release and re-install\n"
+    remove
+    install
+    test $EXITCODE -ne 0 && echo "failed to $ACTION $CHART" && exit 1 || :    
+
+    verify_deployment aws-privateca-issuer
+
+    exit
+  fi
+
+  echo helm values template
+  cat $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  helm install \
+    --namespace $NAMESPACE \
+    -f $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml \
+    $ADDON $CHART
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION $ADDON" || :
+
+  echo resetting helm-values template.....
+
+  sed -i '' -E "s|role-arn: $ACMPCA_ROLE_ARN|role-arn: __ACMPCA_ROLE_ARN__|g" $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  # get the pod that hosts aws-privateca-issuer
+  export POD=$(kubectl get pods -A -o json | jq -r '.items[] | select(.metadata.name | test("aws-privateca-issuer")).metadata.name')
+
+  if [[ -z "$POD" ]] ; then
+    echo "failed to locate pod for $CHART" && exit 1
+  fi
+
+  # get the deployment, and verify
+  deployment=$(kubectl get deployment -A -o json | jq -r '.items[] | select(.metadata.name | test("aws-privateca-issuer")).metadata.name')
+  if [[ -z "$deployment" ]] ; then
+    echo "failed to locate deployment for $CHART" && exit 1
+  fi
+
+  verify_deployment aws-privateca-issuer
+
+  # Install issuer resource.
+
+  sed -i '' -E "s,__PCA_ARN__,\'$PCA_ARN\',g" $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+  sed -i '' -E "s,__MESH_NAME__,\'$MESH_NAME\',g" $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+
+  cat $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+
+  kubectl apply -f $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION $ISSUER_RESOURCE" || :
+
+  echo resetting $ISSUER_RESOURCE.....
+
+  sed -i '' -E "s,\'$PCA_ARN\',__PCA_ARN__,g" $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+  sed -i '' -E "s,\'$MESH_NAME\',__MESH_NAME__,g" $SCRIPT_DIR/$SCRIPT_RESOURCES/$ISSUER_RESOURCE
+
+}
+
+if [[ "$ACTION" == "install" ]] ; then
+
+  install 
+  verify_deployments
+
+elif [[ "$ACTION" == "remove" ]] ; then
+
+  remove
+
+else
+  echo unknown action $ACTION
+  exit 1
+fi
+
+EXITCODE=$?
+test $EXITCODE -ne 0 && echo "failed to $ACTION $CHART" && exit 1 || :

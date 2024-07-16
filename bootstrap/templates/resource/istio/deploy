@@ -1,0 +1,249 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Install launcher for IstioOperator deployment to eks
+- Updates IstioOperator and Secret resource files in the same directory
+- Installs Istio, resources and a test app on the cluster
+- verifies deployments and app
+- resets IstioOperator and Secret templates
+ 
+PARAMETERS
+- ACTION (install | remove)
+- EKS CLUSTER_NAME
+
+USAGE: ./deploy install my-cluster-name
+
+Requires
+- jq
+- yq
+- awscli
+- kubectl
+- istioctl
+
+ENV must be set when calling this
+TODO: possibly replace the sed templating with helm template. We will still need to get
+      the required values from Secrets Manager (or other) dynamically at runtime.
+DESCRIPTION
+
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export ENABLE_POD_SECURITY_ADMINISTRATION=$(echo $(ack -o '^enable_pod_security_administration.*=\K.*$' ../../env/$ENV/istio.tfvars | sed 's/^ //g' | sed 's/ $//g') | tr -d '"')
+
+echo PSA .... $ENABLE_POD_SECURITY_ADMINISTRATION
+
+if [[ -z "$ENABLE_POD_SECURITY_ADMINISTRATION" ]] ; then
+  echo enable pod security adminstration config not found, setting to default false
+  export ENABLE_POD_SECURITY_ADMINISTRATION=false
+fi
+
+echo enable pod security administration $ENABLE_POD_SECURITY_ADMINISTRATION
+
+export ACTION=$1
+export CLUSTER_NAME=$2
+export ISTIO_PATH=../istio
+export OPERATOR_RESOURCE=istio-operator.yaml
+export SECRET_RESOURCE=connect-to-mesh.yaml
+export OPERATOR_RESOURCE_PATH="$ISTIO_PATH/$OPERATOR_RESOURCE"
+export SECRET_RESOURCE_PATH="$ISTIO_PATH/$SECRET_RESOURCE"
+export HELLOWORLD_RESOURCE_PATH="$ISTIO_PATH/helloworld/"
+export TESTAPP=helloworld
+source $SCRIPT_DIR/../functions
+export REGION=$(get_cluster_region $CLUSTER_NAME)
+
+verify_template() {
+  reset_status=$(env -i git diff $SCRIPT_DIR/$1)
+  if [ ! -z "$reset_status" ] ; then
+    echo "not_ready"
+  else
+    echo "ready"
+  fi
+  unset reset_status
+}
+
+operator_resource_status=$(verify_template $OPERATOR_RESOURCE_PATH)
+secret_resource_status=$(verify_template $SECRET_RESOURCE_PATH)
+
+if [[ "not_ready" == "$operator_resource_status" ]] ; then
+  echo -e "$OPERATOR_RESOURCE template not reset, abort" && exit 1
+fi
+if [[ "not_ready" == "$secret_resource_status" ]] ; then
+  echo -e "$SECRET_RESOURCE template not reset, abort" && exit 1
+fi
+
+source ../functions
+export REGION_SHORT=$(echo $CLUSTER_NAME| cut -d '-' -f 5)
+export ENVIRONMENT_MESH=$(get_mesh $ENV)
+export REGION=$(get_cluster_region $CLUSTER_NAME)
+
+# THIS SECRET NEEDS TO BE CREATED THROUGH AUTOMATION. WAS MANUALLY ADDED FOR NOW
+export MESH_INFO_SECRET_NAME= __ISTIO_MESH_SECRET__
+
+../kubeconfig $CLUSTER_NAME
+
+if [ ! $(which istioctl) ] ; then
+  echo istioctl is required but not found
+  exit 1
+fi
+
+echo retrieving istio mesh information from secrets manager......
+echo -e "Cluster region $REGION"
+export mesh_server=$(get_secret "$MESH_INFO_SECRET_NAME" "server")
+export mesh_id=$(get_secret "$MESH_INFO_SECRET_NAME" "mesh_id")
+export mesh_cluster=$(get_secret "$MESH_INFO_SECRET_NAME" "mesh_cluster")
+export mesh_cert_data=$(get_secret "$MESH_INFO_SECRET_NAME" "cert_data")
+export mesh_token=$(get_secret "$MESH_INFO_SECRET_NAME" "token")
+export mesh_external_subnets=$(get_istio_external_subnets $ENV)
+
+prepare_resources() {
+  for file in "$OPERATOR_RESOURCE_PATH $SECRET_RESOURCE_PATH"
+  do
+    echo generating resource file $file......
+
+    if [[ "$file" == "$OPERATOR_RESOURCE_PATH" ]] ; then
+      yq e '.spec.components.cni.enabled = env(ENABLE_POD_SECURITY_ADMINISTRATION)' -i $SCRIPT_DIR/$file
+    fi
+
+    sleep 2
+    sed -i '' -E "s/__CLUSTER_NAME__/$CLUSTER_NAME/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/__EXTERNAL_SUBNETS__/$mesh_external_subnets/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/__MESH_ID__/$mesh_id/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/: __MESH_CLUSTER__/: $mesh_cluster/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/__MESH_CLUSTER__:/$mesh_cluster:/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/istio-remote-secret-__MESH_CLUSTER__/istio-remote-secret-$mesh_cluster/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s,: __SERVER__,: $mesh_server,g" $SCRIPT_DIR/$file
+    sed -i '' -E "s,__CERT_DATA__,$mesh_cert_data,g" $SCRIPT_DIR/$file
+    sed -i '' -E "s,__TOKEN__,$mesh_token,g" $SCRIPT_DIR/$file
+
+    #cat $file
+  done
+}
+
+reset_templates() {
+  for file in "$OPERATOR_RESOURCE_PATH $SECRET_RESOURCE_PATH"
+  do
+    echo -e "\nreset $file template......."
+
+    if [[ "$file" == "$OPERATOR_RESOURCE_PATH" ]] ; then
+      yq e '.spec.components.cni.enabled = false' -i $SCRIPT_DIR/$file
+    fi
+
+    sed -i '' -E "s/$CLUSTER_NAME/__CLUSTER_NAME__/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/meshID: $1/meshID: __MESH_ID__/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/$mesh_external_subnets/__EXTERNAL_SUBNETS__/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/: $2/: __MESH_CLUSTER__/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/$2:/__MESH_CLUSTER__:/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s/istio-remote-secret-$2/istio-remote-secret-__MESH_CLUSTER__/g" $SCRIPT_DIR/$file
+    sed -i '' -E "s,: $3,: __SERVER__,g" $SCRIPT_DIR/$file
+    sed -i '' -E "s,certificate-authority-data:.*$,certificate-authority-data: __CERT_DATA__,g" $SCRIPT_DIR/$file
+    # sed command macos issue
+    # different sed command needed for cert_data to handle very long base64 string
+    # using -E string/string without regex yields error: unterminated substitute pattern
+    # using -f string/string without regex yields error: filename too long
+    sed -i '' -E "s,$4,__TOKEN__,g" $SCRIPT_DIR/$file
+
+  done
+}
+
+deploy_helloworld() {
+  echo -e "Deploying helloworld on $CLUSTER_NAME......"
+
+  kubectl apply -f $HELLOWORLD_RESOURCE_PATH/namespace.yaml
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to deploy $HELLOWORLD_RESOURCE_PATH/namespace.yaml" || :
+
+  sleep 2
+  kubectl apply -f $HELLOWORLD_RESOURCE_PATH/helloworld.yaml
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to deploy $HELLOWORLD_RESOURCE_PATH/helloworld.yaml" && exit 1 || :
+
+  deployment=$(kubectl get deployment -A -o json | jq -r --arg TESTAPP "$TESTAPP" '.items[] | select(.metadata.name | test($TESTAPP)).metadata.name')
+  if [[ -z "$deployment" ]] ; then
+    echo "failed to locate deployment for $TESTAPP" && exit 1
+  fi
+
+  verify_deployment $TESTAPP
+}
+
+
+remove_helloworld() {
+  export removable=$(kubectl get deployments -A -o json | jq -r .items[])
+
+  if [[ ${removable} == *"helloworld"* ]] ; then
+    echo -e "Removing helloworld on $CLUSTER_NAME......"
+
+    kubectl delete -f $HELLOWORLD_RESOURCE_PATH/helloworld.yaml
+
+    EXITCODE=$?
+    test $EXITCODE -ne 0 && echo "failed to remove $HELLOWORLD_RESOURCE_PATH/helloworld.yaml" || :
+
+    kubectl delete -f $HELLOWORLD_RESOURCE_PATH/namespace.yaml
+
+    EXITCODE=$?
+    test $EXITCODE -ne 0 && echo "failed to remove $HELLOWORLD_RESOURCE_PATH/namespace.yaml" || :
+
+  else
+    echo -e "helloworld not installed on $CLUSTER_NAME......."
+  fi
+}
+
+
+install() {
+
+  prepare_resources
+
+  echo -e "Deploying IstioOperator on $CLUSTER_NAME......"
+  istioctl install --set profile=myprofile -f $OPERATOR_RESOURCE_PATH -y
+
+  echo -e "Verify deployment on $CLUSTER_NAME......"
+  istioctl verify-install
+
+  kubectl get deployments -n istio-system
+
+  echo -e "Deploying Istio Secret resource on $CLUSTER_NAME......"
+  kubectl apply -f $SECRET_RESOURCE_PATH
+  sleep 2
+  kubectl get deployments -n istio-system
+
+  # reset
+  reset_templates $mesh_id $mesh_cluster $mesh_server $mesh_token
+}
+
+
+remove() {
+  export removable=$(kubectl get deployments -n istio-system -o json | jq -r .items[])
+
+  if [[ ! -z "$removable" ]] ; then
+    echo Removing IstioOperator deployment for $CLUSTER_NAME.....
+
+    prepare_resources
+
+    kubectl delete -f $SECRET_RESOURCE_PATH
+
+    istioctl uninstall --purge -y
+
+    sleep 2
+    kubectl get deployments -A
+
+    reset_templates $mesh_id $mesh_cluster $mesh_server $mesh_token
+
+  else
+    echo Istio not installed on $CLUSTER_NAME....
+  fi
+}
+
+case $ACTION in
+  install)
+    echo prepare IstioOperator deployment for $CLUSTER_NAME.....
+    install
+    deploy_helloworld
+    verify_deployment istio
+    verify_deployments
+    ;;
+
+  remove)
+    remove_helloworld
+    remove
+    verify_deployment istio
+    verify_deployments
+    ;;
+esac

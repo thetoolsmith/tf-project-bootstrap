@@ -1,0 +1,56 @@
+# BOOTSTRAP VERSION: 0.0.3
+
+environment = "__ENVIRONMENT__"
+region      = "__REGION__"
+
+required_tags = {
+  product        = "__PRODUCT__"
+  description    = "__ENVIRONMENT__ core infrastructure"
+  organization   = "engineering"
+  owner          = "__OWNER__"
+  site           = "us"
+  purpose        = "__PRODUCT__"
+  environment    = "__ENVIRONMENT__"
+  classification = "unrestricted"
+  email          = "__OWNER__@myorg.com"
+}
+
+product = "__PRODUCT__"
+
+initial_vmgroup = "AA"
+
+sre_group = {
+  __ENVIRONMENT__ = "__INITIAL_SRE__"
+}
+
+optional_tags = {
+  environment = "__ENVIRONMENT__"
+  product     = "__PRODUCT__"
+}
+
+replica_region = {
+  us-east-1    = "us-west-2"
+  us-east-2    = "us-west-1"
+  us-west-1    = "us-east-2"
+  us-west-2    = "us-east-1"
+  us-central-1 = "us-central-2"
+  us-central-2 = "us-central-1"
+}
+
+short_region = {
+  us-east-1    = "use1"
+  us-east-2    = "use2"
+  us-west-1    = "usw1"
+  us-west-2    = "usw2"
+  us-central-1 = "usc1"
+  us-central-2 = "usc2"
+}
+
+aws_region = {
+  use1 = "us-east-1"
+  use2 = "us-east-2"
+  usw1 = "us-west-1"
+  usw2 = "us-west-2"
+  usc1 = "us-central-1"
+  usc2 = "us-central-2"
+}

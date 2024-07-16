@@ -1,0 +1,4 @@
+@Library('org-my-shared-lib@v1.0.0') _
+
+// This could be a pipeline template where you provide it during a TF project bootstrap.
+// Example use would be to make a copy in the root of the repo if a pipeline is needed

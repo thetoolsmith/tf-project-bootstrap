@@ -1,0 +1,320 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Function for re-use in resource shell scripts
+
+BOOTSTRAP VERSION: 0.0.3
+
+Required tools:
+- aws cli
+- jq
+- kubectl
+
+USAGE: source functions
+DESCRIPTION
+
+get_region() {
+: <<'DESCRIPTION'
+Get aws full region from region short name
+
+ORDERED ARGUMENTS:
+  SHORT_REGION (example use1, use2, usw1 etc..)
+DESCRIPTION
+
+  case $1 in
+
+    use1)
+      echo us-east-1
+      ;;
+
+    use2)
+      echo us-east-2
+      ;;
+
+    usw1)
+      echo us-west-1
+      ;;
+
+    usw2)
+      echo us-west-2
+      ;;
+
+    *)
+      echo unsupported short region realized from $1 && exit 1
+
+  esac
+}
+
+
+get_cluster_region() {
+: <<'DESCRIPTION'
+Get aws full region name from region short in cluster name
+
+ORDERED ARGUMENTS:
+  CLUSTER_NAME (should contain aws short region)
+DESCRIPTION
+
+  REGION_SHORT=$(echo $1| cut -d '-' -f 5)
+
+  case $REGION_SHORT in
+
+    use1)
+      echo us-east-1
+      ;;
+
+    use2)
+      echo us-east-2
+      ;;
+
+    usw1)
+      echo us-west-1
+      ;;
+
+    usw2)
+      echo us-west-2
+      ;;
+
+    *)
+      echo unsupported short region realized from $1 && exit 1
+
+  esac
+}
+
+
+get_short_region() {
+: <<'DESCRIPTION'
+Get region short name from aws full region
+
+ARGUMENTS
+  full aws region (example us-east-1, us-east-2 etc...)
+DESCRIPTION
+
+  case $1 in
+    us-east-1)
+      echo use1
+      ;;
+
+    us-east-2)
+      echo use2
+      ;;
+
+    us-west-1)
+      echo usw1
+      ;;
+
+    us-west-2)
+      echo usw2
+      ;;
+
+    *)
+      echo unsupported region specified $1 && exit 1
+
+  esac
+}
+
+dynamicLookupCaArn() {
+: <<'DESCRIPTION'
+Gets the CA arn based on CN (environment.region_short)
+
+ORDERED ARGUMENTS:
+  CA_NAME (playground, staging, production)
+  SHORT_REGION
+DESCRIPTION
+
+  export CA_REGION_SHORT=$(echo $2 | tr '[:upper:]' '[:lower:]')
+
+  export AWS_REGION=$(get_region $CA_REGION_SHORT)
+
+  export CA_NAME=$(echo $1 | tr '[:upper:]' '[:lower:]')
+
+  export CA_ARN=$(aws acm-pca list-certificate-authorities --resource-owner OTHER_ACCOUNTS --region $AWS_REGION --query "CertificateAuthorities[?Type=='SUBORDINATE' && Status!='DELETED' && CertificateAuthorityConfiguration.Subject.CommonName=='$CA_NAME.$CA_REGION_SHORT']".Arn | jq -r .[])
+
+  echo $CA_ARN
+}
+
+get_ca_name() {
+: <<'DESCRIPTION'
+Map environment to Private CA Common Name (based on format name.shortregion. i.e playground.use1).
+We deploy ACM Private CA based on a high level environment (playground, staging etc...)
+This function maps that CA environment to a user defined environment such as dev, qa etc..
+
+If you are using an environment name other than dev, qa, staging or production, it is assumed that playground is the CA to be used.
+
+TODO: The case select options below can be updated if there are more known environment names such as staging1 staging2, qa1, qa2 etc... That's tbd.
+
+ORDERED ARGUMENTS:
+  ENV (dev, qa, etc...)
+DESCRIPTION
+
+  export environment=$(echo $1 | tr '[:upper:]' '[:lower:]')
+
+  case $environment in
+      qa)
+        echo qa
+        ;;
+
+      dev)
+        echo dev
+        ;;
+
+      staging)
+        echo staging
+        ;;
+
+      production)
+        echo production
+        ;;
+
+      *)
+        echo dev
+  esac
+}
+
+
+get_istio_external_subnets() {
+: <<'DESCRIPTION'
+This function maps an Istio mesh to a set of external subnets for use in IstioOperator config
+
+ORDERED ARGUMENTS:
+  ENV (dev, qa, etc...)
+DESCRIPTION
+
+  case $1 in
+      qa)
+        echo "subnet-00000000001, subnet-0000000000002"
+        ;;
+
+      dev)
+        echo "subnet-00000000001, subnet-0000000000002"
+        ;;
+
+      staging)
+        echo "subnet-00000000001, subnet-0000000000002"
+        ;;
+
+      production)
+        echo "subnet-00000000001, subnet-0000000000002"
+        ;;
+
+      *)
+        echo "subnet-00000000001, subnet-0000000000002"
+  esac
+}
+
+
+get_mesh() {
+: <<'DESCRIPTION'
+Map environment to an Istio environment mesh
+Istio Mesh deployment can be different user defined environments than the consumer projects k8s cluster environment names.
+This function maps that mesh environment to a user defined environment such as dev, qa etc..
+
+ORDERED ARGUMENTS:
+  ENV (dev, qa, etc...)
+DESCRIPTION
+
+  case $1 in
+      qa)
+        echo qa
+        ;;
+
+      dev)
+        echo dev
+        ;;
+
+      staging)
+        echo staging
+        ;;
+
+      production)
+        echo production
+        ;;
+
+      *)
+        echo dev
+  esac
+}
+
+
+get_secret() {
+: <<'DESCRIPTION'
+Get Secrets Manager Secret value
+
+ORDERED ARGUMENTS:
+  SECRET_KEY (secret key name)
+  SECRET (secret name)
+DESCRIPTION
+
+  result=$(aws secretsmanager get-secret-value --secret-id $1 | jq -r .SecretString | jq -r .$2)
+  echo $result
+}
+
+
+verify_deployments() {
+: <<'DESCRIPTION'
+Verify all kubernetes (eks) deployments
+Short timeout as this is meant to simply provide a status.
+
+KUBE CONFIG CONTEXT NEEDS TO BE SET PRIOR TO CALLING
+
+NO ARGUMENTS
+DESCRIPTION
+
+  deployments=$(kubectl get deployment -A)
+
+  if [[ $deployments == *"0/1"* ]]; then
+    echo "one or more deployments not ready...."
+  fi
+
+  timeout=60
+  while true && [ $timeout != 0 ] ; do
+    case $deployments in
+        *"0/1"*)
+          echo keep trying....
+          let timeout--
+          if [ $timeout -eq 0 ] ; then
+            echo timeout reached
+          fi
+          sleep 2
+          deployments=$(kubectl get deployment -A)
+          continue ;;
+        *) echo "All deployments ready!"
+           break
+    esac
+    break
+  done
+
+  kubectl get deployment -A
+}
+
+
+verify_deployment() {
+: <<'DESCRIPTION'
+Verify all kubernetes (eks) SPECIFIC deployment
+Outputs all Pods status
+
+KUBE CONFIG CONTEXT NEEDS TO BE SET PRIOR TO CALLING
+
+ORDERED ARGUMENTS:
+  DEPLOYMENT (kubernetes deployment name)
+DESCRIPTION
+
+  export verify=$(kubectl get pods -A -o json | jq -r --arg DEPLOYMENT $1 '.items[] | select(.metadata.name | test($DEPLOYMENT)).status.containerStatuses[]')
+
+  if [[ -z "$verify" ]] ; then
+    echo "failed to locate deployment $1" && exit 1
+  else
+    echo "$verify"
+  fi
+}
+
+verify_resource() {
+: <<'DESCRIPTION'
+Verify kubernetes resource type
+
+KUBE CONFIG CONTEXT NEEDS TO BE SET PRIOR TO CALLING
+
+ORDERED ARGUMENTS:
+  RESOURCE_TYPE (kubernetes resource type)
+DESCRIPTION
+
+  echo not implemented yet........
+}

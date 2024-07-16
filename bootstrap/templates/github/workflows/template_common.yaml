@@ -1,0 +1,147 @@
+name: Reusable Workflow Template
+on:
+  workflow_call:
+    inputs:
+      resource_type:
+        description: 'The aws resource type to run terraform templates'
+        required: true
+        default: 'undefined'
+        type: string
+      environment:
+        description: 'caller defined environment (dev, qa, staging, production, other)'
+        required: true
+        default: 'undefined'
+        type: string
+      region:
+        description: 'aws base region (where tfstate lives)'
+        required: true
+        default: 'us-east-1'
+        type: string
+      target:
+        description: 'The make target to run'
+        required: false
+        default: 'plan'
+        type: string
+      render_only:
+        description: 'render template only'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  AWS_AUTH:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Set ACCOUNT #update accounts as needed
+        description: Sets the IAM account to use for provisioning
+        id: set-account
+        run: |
+          if [ '${{ github.event.inputs.environment }}' == 'dev' ]; then
+            echo "::set-output name=role::${{ secrets.DEV_ROLE }}"
+          elif [ '${{ github.event.inputs.environment }}' == 'qa' ]; then
+            echo "::set-output name=role::${{ secrets.QA_ROLE }}"
+          elif [ '${{ github.event.inputs.environment }}' == 'staging' ]; then
+            echo "::set-output name=role::${{ secrets.STAGING_ROLE }}"
+          elif [ '${{ github.event.inputs.environment }}' == 'production' ]; then
+            echo "::set-output name=role::${{ secrets.PRODUCTION_ROLE }}"
+          else
+            echo "::set-output name=role::${{ secrets.DEV_ROLE }}"
+          fi
+        shell: bash
+
+      - name: awsAuth
+        if: ${{ !(github.event.inputs.render_only == 'true') }}
+        run: |
+          export AWS_ROLE_ARN=${{ steps.set-account.outputs.role }}
+          export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/oidcawscreds
+          export AWS_DEFAULT_REGION=${{ github.event.inputs.region }}
+          echo AWS_WEB_IDENTITY_TOKEN_FILE=$AWS_WEB_IDENTITY_TOKEN_FILE >> $GITHUB_ENV
+          echo AWS_ROLE_ARN=$AWS_ROLE_ARN >> $GITHUB_ENV
+          echo AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION >> $GITHUB_ENV
+          curl -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r '.value' > $AWS_WEB_IDENTITY_TOKEN_FILE
+
+      - name: Install aws cli
+        run: |
+          sudo apt-get update -y && \
+          sudo apt-get install -y curl unzip jq && \
+          sudo curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+          sudo unzip awscliv2.zip && \
+          sudo ./aws/install --update
+
+      - name: Get Credentials
+        if: ${{ !(github.event.inputs.render_only == 'true') }}
+        run: |
+          export creds_json=$(aws sts assume-role-with-web-identity --web-identity-token file://$AWS_WEB_IDENTITY_TOKEN_FILE --role-arn $AWS_ROLE_ARN --role-session-name github-actions-${{ github.event.repository.name }}-${{ github.run_id }} --duration-seconds 1200)
+          export AWS_ACCESS_KEY_ID=$(echo "$creds_json" | jq .Credentials.AccessKeyId | tr -d '"')
+          export AWS_SECRET_ACCESS_KEY=$(echo "$creds_json" | jq .Credentials.SecretAccessKey | tr -d '"')
+          export AWS_SESSION_TOKEN=$(echo "$creds_json" | jq .Credentials.SessionToken | tr -d '"')
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" >> /tmp/awscreds
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> /tmp/awscreds
+          echo "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}" >> /tmp/awscreds
+
+      - name: Upload Auth
+        if: ${{ !(github.event.inputs.render_only == 'true') }}
+        uses: actions/upload-artifact@v2
+        with:
+          name: auth
+          path: /tmp/awscreds
+
+  PROVISION_IAC:
+    runs-on: ubuntu-latest
+    env:
+      ACTION: deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Install pre-requisite tools
+        run: echo installing tools......
+
+      - name: Download auth
+        if: ${{ !(github.event.inputs.render_only == 'true') }}
+        uses: actions/download-artifact@v2
+        with:
+          name: auth
+
+      - name: Get Auth
+        if: ${{ !(github.event.inputs.render_only == 'true') }}
+        shell: bash
+        id: get-auth
+        run: |
+          AWS_ACCESS_KEY_ID=$(grep AWS_ACCESS_KEY_ID  awscreds | awk -F '=' '{print $2}')
+          AWS_SECRET_ACCESS_KEY=$(grep AWS_SECRET_ACCESS_KEY awscreds | awk -F '=' '{print $2}')
+          AWS_SESSION_TOKEN=$(grep AWS_SESSION_TOKEN awscreds | awk -F '=' '{print $2}')
+          echo "::add-mask::$AWS_ACCESS_KEY_ID"
+          echo "::add-mask::$AWS_SECRET_ACCESS_KEY"
+          echo "::add-mask::$AWS_SESSION_TOKEN"
+          echo "::set-output name=AWS_ACCESS_KEY_ID::$(grep AWS_ACCESS_KEY_ID awscreds | awk -F '=' '{print $2}')"
+          echo "::set-output name=AWS_SECRET_ACCESS_KEY::$(grep AWS_SECRET_ACCESS_KEY awscreds | awk -F '=' '{print $2}')"
+          echo "::set-output name=AWS_SESSION_TOKEN::$(grep AWS_SESSION_TOKEN awscreds | awk -F '=' '{print $2}')"
+
+      - name: User defined inputs
+        description: Information only
+        uses: actions/github-script@v6
+        with:
+          script: console.log(context.payload.inputs)
+
+      - name: Write Makefile vars to job global
+        run: |
+          echo "REGION=${{ github.event.inputs.region }}" >> $GITHUB_ENV
+          echo "ENV=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "RESOURCE=${{ github.event.inputs.resource_type }}" >> $GITHUB_ENV
+
+      - name: Run Terraform
+        working-directory: ./terraform
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          ENV: ${{ github.event.inputs.environment }}
+          RESOURCE: ${{ github.event.inputs.resource_type }}
+          AWS_ACCESS_KEY_ID: ${{ steps.get-auth.outputs.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.get-auth.outputs.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ steps.get-auth.outputs.AWS_SESSION_TOKEN }}
+        run: |
+          make ${{ github.event.inputs.target }}

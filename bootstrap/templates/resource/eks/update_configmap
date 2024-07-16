@@ -1,0 +1,79 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Update eks cluster aws auth configMap 
+To be run when needed after eks cluster if provisioned with eks TF template
+
+PARAMETERS
+- EKS CLUSTER_NAME
+
+PREREQUISITES:
+YOU MUST BE AUTHENTICATED TO AWS BEFORE RUNNING THIS
+This script used aws sts get-caller-identity to realize IAM account and IAM role for the current user
+
+Required tools
+- awscli
+- jq
+- eksctl
+
+ENVIRONMENT VARS EXPECTED:
+- REGION (value aws region)
+- ENV (bootstrapped environment)
+ 
+DESCRIPTION
+
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export CLUSTER_NAME=$1
+
+source $SCRIPT_DIR/../functions
+export REGION=$(get_cluster_region $CLUSTER_NAME)
+
+echo REGION = $REGION
+echo ENV = $ENV
+
+$SCRIPT_DIR/../kubeconfig $CLUSTER_NAME
+
+export CONFIG_MAP=../../env/$ENV/eksIdentityMapping.yaml
+
+verify_template() {
+  reset_status=$(env -i git diff $1)
+  if [ ! -z "$reset_status" ] ; then
+    echo "not_ready"
+  else
+    echo "ready"
+  fi
+  unset reset_status
+}
+
+config_map_status=$(verify_template $CONFIG_MAP)
+
+if [[ "not_ready" == "$config_map_status" ]] ; then
+  echo -e "$CONFIG_MAP template not reset, abort" && exit 1
+fi
+
+export IAM_ROLE=$(basename $(dirname $(aws sts get-caller-identity | jq -r .Arn)))
+export IAM_ACCOUNT=$(aws sts get-caller-identity | jq -r .Account)
+
+echo "Updating ConfigMap for $CLUSTER_NAME"
+
+sed -i '' -E "s/__CLUSTER_NAME__/$CLUSTER_NAME/g" $CONFIG_MAP
+sed -i '' -E "s/__IAM_ROLE__/$IAM_ROLE/g" $CONFIG_MAP
+sed -i '' -E "s/__ACCOUNT__/$IAM_ACCOUNT/g" $CONFIG_MAP
+sed -i '' -E "s/__REGION__/$REGION/g" $CONFIG_MAP
+
+cat $CONFIG_MAP
+
+eksctl create iamidentitymapping -f $CONFIG_MAP
+
+EXITCODE=$?
+test $EXITCODE -ne 0 && echo "failed to update ConfigMap on $CLUSTER_NAME" && exit 1 || :
+
+echo ConfigMap:
+echo $(eksctl get iamidentitymapping --cluster $CLUSTER_NAME --region=$REGION --output json)
+
+echo -e "\nResetting template $CONFIG_MAP"
+
+sed -i '' -E "s/$CLUSTER_NAME/__CLUSTER_NAME__/g" $CONFIG_MAP
+sed -i '' -E "s/$IAM_ROLE/__IAM_ROLE__/g" $CONFIG_MAP
+sed -i '' -E "s/$IAM_ACCOUNT/__ACCOUNT__/g" $CONFIG_MAP
+sed -i '' -E "s/$REGION/__REGION__/g" $CONFIG_MAP
+

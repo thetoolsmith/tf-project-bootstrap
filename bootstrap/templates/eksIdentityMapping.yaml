@@ -1,0 +1,15 @@
+---
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: __CLUSTER_NAME__
+  region: __REGION__
+
+iamIdentityMappings:
+  - arn: arn:aws:iam::__ACCOUNT__:role/__IAM_ROLE__
+    groups:
+      - system:masters
+    username: '*'
+    noDuplicateARNs: true
+  - account: '__ACCOUNT__'

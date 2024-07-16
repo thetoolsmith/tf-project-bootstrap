@@ -1,0 +1,62 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Install launcher for installing and removing external add-ons
+This is sourced from the bootstrapped environment eks terraform vars
+ 
+PARAMETERS
+- ACTION (install | remove)
+- EKS CLUSTER_NAME
+
+Requires
+- awscli
+- jq
+- kubectl
+
+USAGE: ./installer install my-cluster-name
+
+ENV must be set when calling this
+DESCRIPTION
+
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export EXT_ADDONS=$(echo $(ack -o '^external_addons.*=\K.*$' ../../env/$ENV/eks.tfvars | sed 's/^ //g' | sed 's/ $//g') | tr -d '"')
+
+# incase we are debugging and running from SCRIPT_DIR
+if [[ -z "$EXT_ADDONS" ]] ; then
+  export EXT_ADDONS=$(echo $(ack -o '^external_addons.*=\K.*$' ../../../env/$ENV/eks.tfvars | sed 's/^ //g' | sed 's/ $//g') | tr -d '"')
+fi
+
+if [[ -z "$EXT_ADDONS" ]] ; then
+  echo no external_addons found in eks.tfvars && exit 1
+fi
+
+export ACTION=$1
+export CLUSTER_NAME=$2
+
+source $SCRIPT_DIR/../../functions
+export REGION=$(get_cluster_region $CLUSTER_NAME)
+
+echo REGION = $REGION
+echo ENV = $ENV
+
+$SCRIPT_DIR/../../kubeconfig $CLUSTER_NAME
+
+case $ACTION in
+  install)
+    for addon in $EXT_ADDONS
+    do
+      echo installing $addon.....
+      ./add-ons/$addon $ACTION
+    done
+    echo verify all installer deployments......
+    kubectl get deployment -A
+    ;;
+
+  remove)
+    export REMOVE_EXT_ADDONS=$(echo "$EXT_ADDONS" | tr ' ' '\n' | tail -r | xargs)
+    for addon in $REMOVE_EXT_ADDONS
+    do
+      echo removing $addon.....
+      ./add-ons/$addon $ACTION
+    done
+    ;;
+esac

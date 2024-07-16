@@ -1,0 +1,46 @@
+name: Deploy Caller Workflow
+on:
+  workflow_dispatch:
+    inputs:
+      resource_type:
+        description: 'The aws resource type to run terraform templates'
+        required: true
+        default: 'eks'
+        type: choice
+        options:
+        - eks
+        - s3
+      environment:
+        description: 'user defined environment (dev, qa, staging, production, other)'
+        required: true
+        default: 'dev'
+        type: string
+      target:
+        description: 'the make target to run'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+        - plan
+        - apply
+        - 'eks-ext-addons-deploy'
+        - 'eks-ext-addons-verify'
+        - 'eks-istio-deploy'
+        - 'eks-lb-controller-deploy'
+        - 'eks-lb-controller-verify'
+      render_only:
+        description: 'render template only'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  provision-terraform:
+    uses: ./.github/workflows/template_common.yml
+    with:
+      resource_type: ${{ github.event.inputs.resource_type }}
+      environment: ${{ github.event.inputs.environment }}
+      target: ${{ github.event.inputs.target }}
+      region: 'us-east-1'
+      render_only: true
+    secrets: inherit

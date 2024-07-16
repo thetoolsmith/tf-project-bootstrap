@@ -1,0 +1,40 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Verifies deployments status on eks cluster
+
+PARAMETERS
+- ACTION (install | remove)
+- EKS CLUSTER_NAME
+
+Requires
+- awscli
+- jq
+- kubectl
+
+USAGE: ./installer my-cluster-name
+
+ENV environment variable should be set before calling this. 
+DESCRIPTION
+
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export CLUSTER_NAME=$1
+source $SCRIPT_DIR/../../functions
+export REGION=$(get_cluster_region $CLUSTER_NAME)
+
+echo REGION = $REGION
+echo ENV = $ENV
+
+#aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+$SCRIPT_DIR/../../kubeconfig $CLUSTER_NAME
+
+echo verify all installer deployments on cluster $CLUSTER_NAME......
+deployments=$(kubectl get deployment -A)
+
+echo -e "$deployments\n"
+
+if [[ $deployments == *"0/1"* ]]; then
+  echo -e "WARNING: *** ONE OR MORE DEPLOYMENTS NOT READY *** ON CLUSTER $CLUSTER_NAME\n"
+else
+  echo -e "SUCCESS: ALL DEPLOYMENTS READY ON $CLUSTER_NAME\n"
+fi
+

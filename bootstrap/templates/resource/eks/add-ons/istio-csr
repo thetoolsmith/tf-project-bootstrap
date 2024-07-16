@@ -1,0 +1,122 @@
+#!/bin/bash
+: <<'DESCRIPTION'
+Installer for istio-csr add-on for eks clusters
+
+PARAMETERS
+- ACTION (install | remove)
+
+USAGE: ./istio-csr install
+
+Requires
+- jq
+- helm
+- kubectl
+
+ENV must be set when calling this
+
+References
+
+TODO: determine values input overrides needed
+DESCRIPTION
+
+export ADDON='cert-manager-istio-csr'
+export SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export ACTION=$1
+export NAMESPACE='cert-manager'
+export SCRIPT_RESOURCES=$(basename $BASH_SOURCE | sed 's/-/_/g')
+
+source $SCRIPT_DIR/../../functions
+export ENVIRONMENT_MESH=$(get_mesh $ENV)
+
+echo ENVIRONMENT_MESH = $ENVIRONMENT_MESH
+echo ENV = $ENV
+
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+
+remove() {
+  namespaces=$(kubectl get namespaces)
+
+  if [[ ! $namespaces == *"$NAMESPACE"* ]] ; then
+    echo "failed to locate namespace $NAMESPACE for $ADDON deployment" && exit 1
+  fi
+
+  helm uninstall \
+    --namespace $NAMESPACE $ADDON
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION $ADDON" || :
+
+}
+
+install() {
+
+  namespaces=$(kubectl get namespaces)
+
+  if [[ ! $namespaces == *"$NAMESPACE"* ]] ; then
+    kubectl create namespace $NAMESPACE
+  fi
+
+  if [[ ! $namespaces == *"istio-system"* ]] ; then
+    kubectl create namespace istio-system
+  fi
+
+  sed -i '' -E "s/__CLUSTER_NAME__/$CLUSTER_NAME/g" $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  sed -i '' -E "s/__MESH_ID__/$ENVIRONMENT_MESH/g" $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  release=$(helm list -A -o json | jq -r '.[] | select(.name | test("cert-manager-istio-csr")).name')
+
+  if [[ "$release" == "cert-manager-istio-csr" ]] ; then
+    echo -e "*** Release already exists for $ADDON.\nHelm is lame and not idempotent!\nHang tight while we remove the release and re-install\n"
+    remove
+    install
+    test $EXITCODE -ne 0 && echo "failed to $ACTION $ADDON" && exit 1 || :    
+
+    verify_deployment cert-manager-istio-csr
+
+    exit
+  fi
+
+  echo helm values template
+  cat $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  helm install \
+    --namespace $NAMESPACE \
+    -f $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml \
+    $ADDON jetstack/cert-manager-istio-csr
+
+  EXITCODE=$?
+  test $EXITCODE -ne 0 && echo "failed to $ACTION $ADDON" || :
+
+  echo resetting helm-values template.....
+
+  sed -i '' -E "s/$CLUSTER_NAME/__CLUSTER_NAME__/g" $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+  sed -i '' -E "s/$ENVIRONMENT_MESH # mesh id/__MESH_ID__ # mesh id/g" $SCRIPT_DIR/$SCRIPT_RESOURCES/helm-values.yaml
+
+  # get the deployment
+  deployment=$(kubectl get deployment -A -o json | jq -r '.items[] | select(.metadata.name | test("cert-manager-istio-csr")).metadata.name')
+  if [[ -z "$deployment" ]] ; then
+    echo "failed to locate deployment for $ADDON" && exit 1
+  fi
+
+  verify_deployment cert-manager-istio-csr
+}
+
+if [[ "$ACTION" == "install" ]] ; then
+
+  install 
+  verify_deployments
+
+elif [[ "$ACTION" == "remove" ]] ; then
+
+  remove
+  verify_deployments
+
+else
+  echo unknown action $ACTION
+  exit 1
+fi
+
+EXITCODE=$?
+test $EXITCODE -ne 0 && echo "failed to $ACTION $ADDON" && exit 1 || :

@@ -1,0 +1,23 @@
+#  Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# *.out files that contain a plan
+*.out
+
+# Intellij
+**/.idea/*
+
+# igore private dev environments
+env/sre*/*
+
+# Python
+**/__pycache__/*
+.python-version
+out/*
+
+# Mac-specific ignores
+.DS_Store

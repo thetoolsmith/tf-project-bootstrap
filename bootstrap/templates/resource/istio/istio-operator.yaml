@@ -1,0 +1,56 @@
+# EXAMPLE ISTIO.....
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  hub: __ISTIO_DISTRO__
+  values:
+    gateways:
+      istio-ingressgateway:
+        injectionTemplate: gateway
+        serviceAnnotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: external
+          service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+          service.beta.kubernetes.io/load-balancer-source-ranges: 0.0.0.0/0
+    global:
+      meshID: __MESH_ID__
+      multiCluster:
+        clusterName: __CLUSTER_NAME__
+      network: __CLUSTER_NAME__
+  components:
+    cni:
+      enabled: false
+    ingressGateways:
+      - name: __INGRESS_GATEWAY__
+        label:
+          istio: ingress_gateway
+          app: ingress_gateway
+          topology.istio.io/network: __CLUSTER_NAME__
+        enabled: true
+        k8s:
+          env:
+            - name: __NETWORK_INTERNAL_TRAFFIC__
+              value: __CLUSTER_NAME__
+          service:
+            ports:
+              - name: status-port
+                port: 15021
+                targetPort: 15021
+              - name: tls
+                port: 15443
+                targetPort: 15443
+              - name: tls-istiod
+                port: 15012
+                targetPort: 15012
+              - name: tls-webhook
+                port: 15017
+                targetPort: 15017
+      - name: __INGRESS_GATEWAY_EXTERNAL__
+        enabled: true
+        label:
+          istio: ingress_gateway_external
+        k8s:
+          serviceAnnotations:
+            service.beta.kubernetes.io/aws-load-balancer-type: external
+            service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+            service.beta.kubernetes.io/aws-load-balancer-subnets: __EXTERNAL_SUBNETS__
+            service.beta.kubernetes.io/aws-load-balancer-scheme: internet_facing

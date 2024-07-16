@@ -1,0 +1,8 @@
+app:
+   server:
+     clusterID: __CLUSTER_NAME__  # NOTE this needs to match the clusterName in the IstioOperator yaml for the cluster
+   certmanager:
+      issuer:
+        group: "awspca.cert-manager.io"
+        kind: "AWSPCAClusterIssuer"
+        name: __MESH_ID__ # mesh id
