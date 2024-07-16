@@ -4,7 +4,7 @@ Currently the only way to use this tool is to clone this repo locally.
 We may implement another method of distribution, but that is tbd.
 
 Bootstrap is combination of two things
-1. Jumping off point for provisioning and deploying AWS resources with Terraform at scale across teams, products, verticals and environments. It does two things at the high level.
+1. Starting point for provisioning and deploying AWS resources with Terraform at scale across teams, products, verticals and environments. It does two things at the high level.
     1. setup terraform foundation aws resources for terraform backend state (per product/environment s3 tfstate bucket), kms key and dynamo table for locking state alog with some important Secrets Manager secrets. This provides the launching pad for teams/consumers to deploy resources with preconfigured state backends, secrets to hold bootstrap output data and a simple command interface (Makefile)
     1. Populates the destination repo (the repo being bootstrapped) with pre-built terraform resource templates. Provides Ready-To-Use terraform for deploying resources at scale across teams, products, verticals and environments. These templates are built to be 100% dynamic. They use discovery tech niques over hardcoded ids, arns etc....whenever possible. Thus, the template may appear to be a bit complex to novice Terraform users. However the intent is to use these as is and not require users of this provisioning automation to learn or understand anything beyond basic entry level terraform knowhow. The complexity falls on the core template and module maintainers. These are the folks that should have deep understanding of Terraform and building things with re-usable scalable templates.
 
@@ -111,7 +111,6 @@ exportCreds() {
 aws-export-credentials --profile dev --credentials-file-profile dev;
 }
 login
-aws sts get-caller-devops
 ```
 
 A couple of things to note in the above shell script.
@@ -121,7 +120,7 @@ Your would run this to login to aws with dev IAM account and get a sso token ref
 source ~/.aws_login dev
 ```
 
-The last line in the script file, ```aws sts get-caller-devops``` is there to just output the new credentials for the aws logged in user. Similar to this output
+A similar output will b generated....
 ```
 {
     "UserId": "989898989898987:first.last",
